@@ -1,12 +1,13 @@
 import os
 import uuid
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Dict, Any
 
 from database import create_document, get_documents, db
-from schemas import Demolead, Demotranscript
+from schemas import Demolead, Demotranscript, Demosession, Demoevent, Demoappointment
 
 app = FastAPI()
 
@@ -78,24 +79,23 @@ class DemoStartResponse(BaseModel):
 @app.post("/demo/start", response_model=DemoStartResponse)
 async def demo_start(payload: DemoStartRequest):
     session_id = uuid.uuid4().hex[:12]
-    # store an initial system message as transcript doc
     greeting = (
         "Bonjour! Ici Cliqo, votre réceptionniste virtuelle. Comment puis‑je vous aider aujourd’hui?"
         if payload.lang == 'fr'
         else "Hi! This is Cliqo, your AI receptionist. How can I help you today?"
     )
-    # persist a lead entry
-    lead = Demolead(name=payload.name, email=f"{session_id}@demo.local", company=payload.company or "Demo", message="Started demo", lang=payload.lang, source='demo')
+    # persist lead + session + first assistant message
     try:
-        create_document('demolead', lead)
+        create_document('demolead', Demolead(name=payload.name, email=f"{session_id}@demo.local", company=payload.company or "Demo", message="Started demo", lang=payload.lang, source='demo'))
+        create_document('demosession', Demosession(session_id=session_id, name=payload.name, company=payload.company, lang=payload.lang))
         create_document('demotranscript', {
             'session_id': session_id,
             'role': 'assistant',
             'text': greeting,
             'lang': payload.lang
         })
+        create_document('demoevent', Demoevent(session_id=session_id, type='session_start', data={'lang': payload.lang}))
     except Exception:
-        # continue even if DB not configured
         pass
     return DemoStartResponse(session_id=session_id, greeting=greeting)
 
@@ -108,45 +108,68 @@ class DemoMessageResponse(BaseModel):
     reply: str
     suggestions: List[str]
 
+
+def _detect_intent(user: str, lang: str) -> str:
+    if lang == 'fr':
+        if any(k in user for k in ["rendez-vous", "rdv", "planifier", "calendrier", "disponibil"]):
+            return 'schedule'
+        if any(k in user for k in ["prix", "tarif", "coût"]):
+            return 'pricing'
+        if any(k in user for k in ["humain", "agent", "représentant"]):
+            return 'escalate'
+        if any(k in user for k in ["intégration", "google", "outlook", "slack", "zapier", "twilio"]):
+            return 'integrations'
+        return 'general'
+    else:
+        if any(k in user for k in ["appointment", "book", "schedule", "calendar", "availability"]):
+            return 'schedule'
+        if any(k in user for k in ["price", "pricing", "cost"]):
+            return 'pricing'
+        if any(k in user for k in ["human", "agent", "representative"]):
+            return 'escalate'
+        if any(k in user for k in ["integration", "google", "outlook", "slack", "zapier", "twilio"]):
+            return 'integrations'
+        return 'general'
+
 @app.post("/demo/message", response_model=DemoMessageResponse)
 async def demo_message(payload: DemoMessageRequest):
-    # Simple rule-based receptionist behavior for demo purposes
-    user = payload.text.lower()
+    user_lc = payload.text.lower()
+    intent = _detect_intent(user_lc, payload.lang)
 
     if payload.lang == 'fr':
-        if any(k in user for k in ["rendez-vous", "rdv", "planifier", "calendrier", "disponibil"]):
+        if intent == 'schedule':
             reply = "Je peux planifier un rendez‑vous pour vous. Quelle date et heure préférez‑vous?"
-            suggestions = ["Demain 14h", "Vendredi matin", "Semaine prochaine"]
-        elif any(k in user for k in ["prix", "tarif", "coût"]):
+            suggestions = ["Demain 14:00", "Vendredi matin", "Semaine prochaine"]
+        elif intent == 'pricing':
             reply = "Nos forfaits commencent à partir du plan Démarrage et s’adaptent à votre volume d’appels. Voulez‑vous que je vous envoie la grille tarifaire?"
             suggestions = ["Envoyer les tarifs", "Parler à un agent", "Comparer les plans"]
-        elif any(k in user for k in ["humain", "agent", "représentant"]):
+        elif intent == 'escalate':
             reply = "Je peux vous mettre en relation avec un membre de l’équipe. Préférez‑vous être rappelé ou discuter par courriel?"
             suggestions = ["Être rappelé", "Courriel", "Planifier un appel"]
-        elif any(k in user for k in ["intégration", "google", "outlook", "slack", "zapier", "twilio"]):
+        elif intent == 'integrations':
             reply = "Cliqo s’intègre à Google Calendar, Outlook, Slack, Zapier, Twilio et plus encore. Souhaitez‑vous une intégration spécifique?"
             suggestions = ["Google Calendar", "Slack", "Zapier"]
         else:
             reply = "Je peux aider avec la planification, le routage d’appels, et les intégrations. Dites‑moi ce que vous souhaitez faire."
             suggestions = ["Planifier un rendez‑vous", "Voir les tarifs", "Parler à un humain"]
     else:
-        if any(k in user for k in ["appointment", "book", "schedule", "calendar", "availability"]):
+        if intent == 'schedule':
             reply = "I can schedule an appointment for you. What date and time works best?"
-            suggestions = ["Tomorrow 2pm", "Friday morning", "Next week"]
-        elif any(k in user for k in ["price", "pricing", "cost"]):
+            suggestions = ["Tomorrow 2:00 PM", "Friday morning", "Next week"]
+        elif intent == 'pricing':
             reply = "Our plans start at Starter and scale with your call volume. Would you like me to send pricing?"
             suggestions = ["Send pricing", "Talk to an agent", "Compare plans"]
-        elif any(k in user for k in ["human", "agent", "representative"]):
+        elif intent == 'escalate':
             reply = "I can connect you with our team. Would you prefer a callback or email?"
             suggestions = ["Request callback", "Email", "Schedule a call"]
-        elif any(k in user for k in ["integration", "google", "outlook", "slack", "zapier", "twilio"]):
+        elif intent == 'integrations':
             reply = "Cliqo integrates with Google Calendar, Outlook, Slack, Zapier, Twilio, and more. Any specific integration in mind?"
             suggestions = ["Google Calendar", "Slack", "Zapier"]
         else:
             reply = "I can help with scheduling, call routing, and integrations. Tell me what you’d like to do."
             suggestions = ["Book appointment", "See pricing", "Talk to a human"]
 
-    # persist transcript if DB available
+    # persist transcript + event if DB available
     try:
         create_document('demotranscript', {
             'session_id': payload.session_id,
@@ -160,10 +183,87 @@ async def demo_message(payload: DemoMessageRequest):
             'text': reply,
             'lang': payload.lang
         })
+        create_document('demoevent', Demoevent(session_id=payload.session_id, type='message', data={'intent': intent}))
     except Exception:
         pass
 
     return DemoMessageResponse(reply=reply, suggestions=suggestions)
+
+# ---- Analytics events ----
+class DemoEventRequest(BaseModel):
+    session_id: str = Field(..., min_length=8)
+    type: str
+    data: Optional[Dict[str, Any]] = None
+
+@app.post("/demo/event")
+async def demo_event(payload: DemoEventRequest):
+    try:
+        create_document('demoevent', Demoevent(session_id=payload.session_id, type=payload.type, data=payload.data))
+    except Exception:
+        pass
+    return {"ok": True}
+
+# ---- Booking endpoint ----
+class DemoBookRequest(BaseModel):
+    session_id: str = Field(..., min_length=8)
+    slot_iso: str = Field(..., description="ISO 8601")
+    lang: Literal['en', 'fr'] = 'en'
+
+class DemoBookResponse(BaseModel):
+    ok: bool
+    reply: str
+
+@app.post("/demo/book", response_model=DemoBookResponse)
+async def demo_book(payload: DemoBookRequest):
+    # minimal validation of ISO format
+    try:
+        dt = datetime.fromisoformat(payload.slot_iso.replace('Z','+00:00'))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid slot format")
+
+    if payload.lang == 'fr':
+        reply = f"Parfait — j’ai réservé ce créneau pour vous le {dt.strftime('%d/%m/%Y à %H:%M')}. Une confirmation vous sera envoyée."
+    else:
+        reply = f"Great — I’ve booked that time for you on {dt.strftime('%Y-%m-%d at %H:%M')}. You’ll receive a confirmation shortly."
+
+    try:
+        create_document('demoappointment', Demoappointment(session_id=payload.session_id, slot_iso=payload.slot_iso, lang=payload.lang))
+        create_document('demotranscript', {
+            'session_id': payload.session_id,
+            'role': 'assistant',
+            'text': reply,
+            'lang': payload.lang
+        })
+        create_document('demoevent', Demoevent(session_id=payload.session_id, type='booking_created', data={'slot_iso': payload.slot_iso}))
+    except Exception:
+        pass
+
+    return DemoBookResponse(ok=True, reply=reply)
+
+# ---- Escalation endpoint ----
+class DemoEscalateRequest(BaseModel):
+    session_id: str = Field(..., min_length=8)
+    channel: Literal['callback', 'email']
+    value: Optional[str] = None
+    lang: Literal['en', 'fr'] = 'en'
+
+@app.post("/demo/escalate")
+async def demo_escalate(payload: DemoEscalateRequest):
+    if payload.lang == 'fr':
+        reply = "Merci. Un membre de notre équipe vous contactera sous peu."
+    else:
+        reply = "Thanks. A team member will reach out shortly."
+    try:
+        create_document('demoevent', Demoevent(session_id=payload.session_id, type='escalation', data={'channel': payload.channel, 'value': payload.value}))
+        create_document('demotranscript', {
+            'session_id': payload.session_id,
+            'role': 'assistant',
+            'text': reply,
+            'lang': payload.lang
+        })
+    except Exception:
+        pass
+    return {"ok": True, "reply": reply}
 
 
 if __name__ == "__main__":

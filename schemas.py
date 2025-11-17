@@ -12,7 +12,7 @@ Model name is converted to lowercase for the collection name:
 """
 
 from pydantic import BaseModel, Field, EmailStr
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any
 
 # Example schemas (replace with your own):
 
@@ -62,3 +62,35 @@ class Demotranscript(BaseModel):
     role: Literal['user', 'assistant']
     text: str = Field(..., min_length=1)
     lang: Literal['en', 'fr'] = 'en'
+
+class Demosession(BaseModel):
+    """
+    Tracks demo sessions and lightweight memory
+    Collection name: "demosession"
+    """
+    session_id: str = Field(..., min_length=8)
+    name: Optional[str] = None
+    company: Optional[str] = None
+    lang: Literal['en', 'fr'] = 'en'
+    last_intent: Optional[str] = None
+
+class Demoevent(BaseModel):
+    """
+    Analytics events for demo interactions
+    Collection name: "demoevent"
+    """
+    session_id: str = Field(..., min_length=8)
+    type: str = Field(..., description="Event type, e.g., session_start, message_sent, suggestion_click, tts_played")
+    data: Optional[Dict[str, Any]] = None
+
+class Demoappointment(BaseModel):
+    """
+    Booked appointments from demo flow
+    Collection name: "demoappointment"
+    """
+    session_id: str = Field(..., min_length=8)
+    slot_iso: str = Field(..., description="ISO 8601 datetime for the appointment")
+    name: Optional[str] = None
+    company: Optional[str] = None
+    lang: Literal['en', 'fr'] = 'en'
+    channel: Literal['web', 'chat', 'phone'] = 'web'
